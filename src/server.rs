@@ -1,47 +1,54 @@
 use crate::serial::api::out as api;
 use crate::serial::api::out::serial_service_server as service;
 use flume;
+use flume::{Receiver, Sender};
 use serialport::SerialPort;
-use std::io::Read;
-use std::ops::{DerefMut, Deref};
+use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
+use std::vec::Vec;
 use std::{collections::HashMap, pin::Pin};
 use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::net::UdpSocket;
-use flume::{Sender, Receiver};
 use tokio::sync::{Mutex, RwLock};
 use tokio_serial::{SerialPortBuilderExt, SerialStream};
 use tracing::{debug, error, info, instrument, trace, warn};
-use std::vec::Vec;
 
-pub struct SendSerialStream(pub SerialStream);
+// a workaround for SerialStream not being Send
+pub struct SyncSerialStream(pub SerialStream);
 
-impl Deref for SendSerialStream {
+impl Deref for SyncSerialStream {
     type Target = SerialStream;
     fn deref(&self) -> &Self::Target {
         &self.0
     }
 }
 
-impl DerefMut for SendSerialStream {
+impl DerefMut for SyncSerialStream {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.0
     }
 }
 
-unsafe impl Send for SendSerialStream {}
-unsafe impl Sync for SendSerialStream {}
+// https://stackoverflow.com/questions/68704717/is-the-sync-trait-a-strict-subset-of-the-send-trait-what-implements-sync-withou
+unsafe impl Sync for SyncSerialStream {}
+
+pub struct Channel<T> {
+    pub rx: Arc<Receiver<T>>,
+    pub tx: Arc<Sender<T>>,
+}
 
 pub type BufferType = Vec<u8>;
-pub type PinnedSerialPort = Pin<Arc<RwLock<SendSerialStream>>>;
+pub type PinnedSerialPort = Pin<Arc<Mutex<SyncSerialStream>>>;
 pub struct ManagedSerialDevice {
     pub port: PinnedSerialPort,
     pub port_name: String,
     pub options: api::ManagedOptions,
     pub udp: Option<UdpSocket>,
     pub join_handle: tokio::task::JoinHandle<()>,
-    pub rx: Arc<Receiver<BufferType>>,
-    pub tx: Arc<Sender<BufferType>>,
+    /// outbound refers to data going from the serial port to the outside world
+    pub outbound: Channel<BufferType>,
+    /// inbound refers to data coming from the outside world to the serial port
+    pub inbound: Channel<BufferType>,
 }
 
 #[derive(Default)]
@@ -149,32 +156,33 @@ impl service::SerialService for SerialServer {
                 let mut managed_options = api::ManagedOptions::default();
                 // https://github.com/tokio-rs/tokio/discussions/3891
                 let (tx, rx) = flume::bounded::<BufferType>(8);
-                let tx = Arc::new(tx);
-                let rx = Arc::new(rx);
+                let out_tx = Arc::new(tx);
+                let out_rx = Arc::new(rx);
                 managed_options.options = Some(options.clone());
                 managed_options.udp_port = udp_port;
-                let mut pinned_port = Box::pin(port);
-                let tx_ = tx.clone();
-                let rx_ = rx.clone();
+                let mut pinned_port = Arc::pin(Mutex::new(SyncSerialStream(port)));
+                let mut pinned_port_ = pinned_port.clone();
+                let out_tx_ = out_tx.clone();
+                let out_rx_ = out_rx.clone();
                 let handle = tokio::spawn(async move {
                     let mut buf = [0u8; 512];
                     // https://v0-1--tokio.netlify.app/docs/io/async_read_write/
                     loop {
-                        let r = pinned_port.as_mut().read(&mut buf).await;
+                        let r = pinned_port_.lock().await.read(&mut buf).await;
                         match r {
                             Ok(n) => {
                                 let mut v = std::vec::Vec::with_capacity(n);
                                 v.extend_from_slice(&buf[0..n]);
-                                if let Some(mut c) = rx_.capacity() {
-                                    while c >= tx_.len() {
-                                        debug!("full channel for {} >= {}", tx_.len(), c);
-                                        let _ = rx_.recv_async().await;
-                                        c = rx_.capacity().unwrap_or(0);
+                                if let Some(mut c) = out_rx_.capacity() {
+                                    while c >= out_tx_.len() {
+                                        debug!("full channel for {} >= {}", out_tx_.len(), c);
+                                        let _ = out_rx_.recv_async().await;
+                                        c = out_rx_.capacity().unwrap_or(0);
                                     }
                                 } else {
                                     debug!("unbounded channel");
                                 }
-                                match tx_.send(v) {
+                                match out_tx_.send(v) {
                                     Ok(_) => {}
                                     Err(e) => {
                                         error!("error sending to channel: {}", e);
@@ -196,8 +204,7 @@ impl service::SerialService for SerialServer {
                     options: managed_options.clone(),
                     udp: None,
                     join_handle: handle,
-                    rx: rx,
-                    tx: tx,
+                    outbound: Channel { rx: out_rx, tx: out_tx },
                 };
                 let mut response = api::Serial::default();
                 // https://github.com/hyperium/tonic/discussions/1094
