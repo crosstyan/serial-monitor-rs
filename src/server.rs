@@ -40,18 +40,46 @@ pub struct Channel<T> {
 pub type BufferType = Vec<u8>;
 pub type PinnedSerialPort = Pin<Arc<Mutex<SyncSerialStream>>>;
 pub struct ManagedSerialDevice {
-    pub port: PinnedSerialPort,
-    pub port_name: String,
-    pub options: api::ManagedOptions,
-    pub udp: Option<UdpSocket>,
-    pub outbound_handle: tokio::task::JoinHandle<()>,
-    pub inbound_handle: tokio::task::JoinHandle<()>,
+    port: PinnedSerialPort,
+    port_name: String,
+    options: api::ManagedOptions,
+    udp: Option<UdpSocket>,
+    outbound_handle: tokio::task::JoinHandle<()>,
+    inbound_handle: tokio::task::JoinHandle<()>,
     /// outbound refers to data going from the serial port to the outside world.
     /// [Reader] i.e. `rx` is expected to be used. Don't touch `tx`.
-    pub outbound: Channel<BufferType>,
+    outbound: Channel<BufferType>,
     /// inbound refers to data coming from the outside world to the serial port
     /// [Writer] i.e. `tx` is expected to be used. Don't touch `rx`.
-    pub inbound: Channel<BufferType>,
+    inbound: Channel<BufferType>,
+}
+
+impl ManagedSerialDevice {
+    pub fn outbound(&self) -> Arc<Receiver<BufferType>> {
+        self.outbound.rx.clone()
+    }
+    pub fn inbound(&self) -> Arc<Sender<BufferType>> {
+        self.inbound.tx.clone()
+    }
+    pub fn port_name(&self) -> &str {
+        &self.port_name
+    }
+    pub fn udp(&self) -> Option<&UdpSocket> {
+        self.udp.as_ref()
+    }
+    pub fn mut_udp(&mut self) -> Option<&mut UdpSocket> {
+        self.udp.as_mut()
+    }
+    pub fn options(&self) -> &api::ManagedOptions {
+        &self.options
+    }
+}
+
+impl Drop for ManagedSerialDevice {
+    fn drop(&mut self) {
+        let _ = self.outbound_handle.abort();
+        let _ = self.inbound_handle.abort();
+    }
 }
 
 #[derive(Default)]
