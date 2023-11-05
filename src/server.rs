@@ -1,18 +1,28 @@
 use crate::serial::api::out as api;
 use crate::serial::api::out::serial_service_server as service;
+use flume;
 use serialport::SerialPort;
+use std::io::Read;
 use std::sync::Arc;
 use std::{collections::HashMap, pin::Pin};
+use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::net::UdpSocket;
-use tokio::sync::Mutex;
+use flume::{Sender, Receiver};
+use tokio::sync::{Mutex, RwLock};
+use tokio_serial::{SerialPortBuilderExt, SerialStream};
 use tracing::{debug, error, info, instrument, trace, warn};
+use std::vec::Vec;
 
-pub type PinnedSerialPort = Pin<Box<Mutex<Box<dyn SerialPort>>>>;
+pub type BufferType = Vec<u8>;
+pub type PinnedSerialPort = Pin<Box<SerialStream>>;
 pub struct ManagedSerialDevice {
-    port: PinnedSerialPort,
-    port_name: String,
-    options: api::ManagedOptions,
-    udp: Option<UdpSocket>,
+    pub port: PinnedSerialPort,
+    pub port_name: String,
+    pub options: api::ManagedOptions,
+    pub udp: Option<UdpSocket>,
+    pub join_handle: Option<tokio::task::JoinHandle<()>>,
+    pub rx: Option<Receiver<BufferType>>,
+    pub tx: Option<Sender<BufferType>>,
 }
 
 #[derive(Default)]
@@ -110,7 +120,7 @@ impl service::SerialService for SerialServer {
             .stop_bits(stop)
             .flow_control(flow)
             .timeout(timeout)
-            .open();
+            .open_native_async();
         match res {
             Ok(port) => {
                 // https://github.com/tokio-rs/tokio/blob/master/examples/echo-udp.rs
@@ -118,18 +128,53 @@ impl service::SerialService for SerialServer {
                 if udp_port.is_negative() || udp_port == 0 {}
                 let socket = UdpSocket::bind("").await;
                 let mut managed_options = api::ManagedOptions::default();
+                // https://github.com/tokio-rs/tokio/discussions/3891
+                let (tx, rx) = flume::bounded::<BufferType>(8);
                 managed_options.options = Some(options.clone());
                 managed_options.udp_port = udp_port;
-                let pinned_port = {
-                    let m = Mutex::new(port);
-                    Pin::new(Box::new(m))
-                };
+                let pinned_port = Box::pin(port);
+                let handle = tokio::spawn(async {
+                    let mut buf = [0u8; 512];
+                    // https://v0-1--tokio.netlify.app/docs/io/async_read_write/
+                    loop {
+                        let r = pinned_port.as_mut().read(&mut buf).await;
+                        match r {
+                            Ok(n) => {
+                                let mut v = std::vec::Vec::with_capacity(n);
+                                v.extend_from_slice(&buf[0..n]);
+                                if let Some(c) = rx.capacity() {
+                                    while c >= tx.len() {
+                                        debug!("full channel for {} >= {}", tx.len(), c);
+                                        let _ = rx.recv_async().await;
+                                        c = rx.capacity().unwrap_or(0);
+                                    }
+                                } else {
+                                    debug!("unbounded channel");
+                                }
+                                match tx.send(v) {
+                                    Ok(_) => {}
+                                    Err(e) => {
+                                        error!("error sending to channel: {}", e);
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                error!("error reading from serial port: {}", e);
+                            }
+                        }
+                    }
+                });
+                // https://github.com/tokio-rs/tokio/discussions/3891
+                // https://hackernoon.com/pin-safety-understanding-pinning-in-rust-futures
+                // https://v0-1--tokio.netlify.app/docs/internals/net/
                 let managed_dev = ManagedSerialDevice {
-                    // https://hackernoon.com/pin-safety-understanding-pinning-in-rust-futures
                     port: pinned_port,
                     port_name: req.device.clone(),
                     options: managed_options.clone(),
                     udp: None,
+                    join_handle: Some(handle),
+                    rx: Some(rx),
+                    tx: Some(tx),
                 };
                 let mut response = api::Serial::default();
                 // https://github.com/hyperium/tonic/discussions/1094
