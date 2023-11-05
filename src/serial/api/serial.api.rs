@@ -9,14 +9,10 @@ pub struct Serial {
     /// COM      (Windows)
     #[prost(string, tag = "1")]
     pub device: ::prost::alloc::string::String,
-    /// *
-    /// If the serial is opened, it might be opened by other process or by the server itself
-    #[prost(bool, tag = "2")]
-    pub is_opened: bool,
     ///
     /// If the serial is managed by the server, we would see its baud rate and ports
-    #[prost(message, optional, tag = "3")]
-    pub is_managed: ::core::option::Option<ManagedOptions>,
+    #[prost(message, optional, tag = "2")]
+    pub managed: ::core::option::Option<ManagedOptions>,
 }
 /// <https://docs.rs/serialport/latest/serialport/struct.SerialPortBuilder.html>
 /// <https://github.com/protocolbuffers/protobuf/blob/main/src/google/protobuf/duration.proto>
@@ -41,8 +37,8 @@ pub struct OpenOptions {
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ManagedOptions {
-    #[prost(uint32, tag = "1")]
-    pub baud: u32,
+    #[prost(message, optional, tag = "1")]
+    pub options: ::core::option::Option<OpenOptions>,
     /// *
     /// outside -> serial device (write/spit)
     /// outside <- serial device (read/slurp)
@@ -60,6 +56,8 @@ pub struct ListResponse {
 pub struct OpenRequest {
     #[prost(string, tag = "1")]
     pub device: ::prost::alloc::string::String,
+    #[prost(int32, tag = "3")]
+    pub udp_port: i32,
     #[prost(message, optional, tag = "2")]
     pub options: ::core::option::Option<OpenOptions>,
 }
@@ -218,7 +216,8 @@ pub mod serial_service_server {
     pub trait SerialService: Send + Sync + 'static {
         ///
         /// @brief List all available serial devices
-        /// @return ListSerialsResponse
+        /// @return Returns a list of all serial ports on system
+        /// @note It is not guaranteed that these ports exist or are available even if they're returned by this function, unless it's managed
         async fn list(
             &self,
             request: tonic::Request<()>,
