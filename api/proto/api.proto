@@ -1,0 +1,137 @@
+// https://github.com/googleapis/googleapis/blob/master/google/bytestream/bytestream.proto
+
+syntax = "proto3";
+
+import "google/protobuf/empty.proto";
+import "google/protobuf/duration.proto";
+
+// https://protobuf.dev/reference/protobuf/google.protobuf/
+package serial.api;
+
+
+/*
+ * We don't need error type since gRPC already has it.
+ */
+message Serial {
+  /**
+   * /dev/tty (Linux)
+   * /dev/cu  (Mac)
+   * COM      (Windows)
+   */ 
+  string device = 1;
+  /**
+   * If the serial is opened, it might be opened by other process or by the server itself
+   */
+  bool isOpened = 2;
+  /*
+   * If the serial is managed by the server, we would see its baud rate and ports
+   */
+  optional ManagedOptions isManaged = 3;
+}
+
+/** https://docs.rs/serialport/latest/serialport/enum.DataBits.html */
+enum DataBits {
+  /* most common */
+  Eight = 0;
+  Five = 1;
+  Six = 2;
+  Seven = 3;
+}
+
+enum FlowControl {
+  NoFlowControl = 0;
+  // Flow control using XON/XOFF bytes
+  Software = 1;
+  // Flow control using RTS/CTS signals
+  Hardware = 2;
+}
+
+enum Parity {
+  NoParity = 0;
+  Odd = 1;
+  Even = 2;
+}
+
+enum StopBits {
+    One = 0;
+    Two = 1;
+}
+
+// https://docs.rs/serialport/latest/serialport/struct.SerialPortBuilder.html
+// https://github.com/protocolbuffers/protobuf/blob/main/src/google/protobuf/duration.proto
+// the most common should be 8N1 (i.e. 8 data bits, no parity, 1 stop bit)
+message OpenOptions {
+  uint32 baud = 1;
+  DataBits dataBits = 2;
+  FlowControl flowControl = 3;
+  Parity parity = 4;
+  StopBits stopBits = 5;
+  // Set the amount of time to wait to receive data before timing out
+  google.protobuf.Duration timeout = 6;
+}
+
+message ManagedOptions {
+  uint32 baud = 1;
+  /**
+   * outside -> serial device (write/spit)
+   * outside <- serial device (read/slurp)
+   */
+  int32 udpPort = 2;
+}
+
+message ListResponse {
+  repeated Serial serials = 1;
+}
+
+message OpenRequest {
+  string device = 1;
+  OpenOptions options = 2;
+}
+
+message Bytes {
+  bytes value = 1;
+}
+
+message ReadRequest {
+  string device = 1;
+}
+
+message WriteRequest {
+  string device = 1;
+  bytes data = 2;
+}
+
+message CloseRequest {
+  string device = 1;
+}
+
+service SerialService {
+  /*
+   * @brief List all available serial devices
+   * @return ListSerialsResponse
+   */
+  rpc List(google.protobuf.Empty) returns (ListResponse);
+  /*
+   * @brief Open a serial connection to a device
+   * @param OpenSerialRequest The request message containing the device name and baud rate
+   * @return Serial The opened serial
+   */
+  rpc Open(OpenRequest) returns (Serial);
+  /*
+   * @brief Close the serial
+   * @param device The device to close
+   */
+  rpc Close(CloseRequest) returns (google.protobuf.Empty);
+  /*
+   * @brief Read data from a serial device
+   * @param ReadRequest The request message containing the device name
+   * @return stream Bytes A stream of Bytes messages containing the read data
+   */
+  rpc Read(ReadRequest) returns (stream Bytes);
+  /*
+   * @brief Write data to a serial device
+   * @param WriteRequest The request message containing the device name and the data to write
+   * @note If you have access to the UDP protocol, you should use it instead
+   */
+  rpc Write(WriteRequest) returns (google.protobuf.Empty);
+}
