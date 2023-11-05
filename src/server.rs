@@ -7,7 +7,7 @@ use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
 use std::vec::Vec;
 use std::{collections::HashMap, pin::Pin};
-use tokio::io::{AsyncRead, AsyncReadExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::UdpSocket;
 use tokio::sync::{Mutex, RwLock};
 use tokio_serial::{SerialPortBuilderExt, SerialStream};
@@ -44,10 +44,13 @@ pub struct ManagedSerialDevice {
     pub port_name: String,
     pub options: api::ManagedOptions,
     pub udp: Option<UdpSocket>,
-    pub join_handle: tokio::task::JoinHandle<()>,
-    /// outbound refers to data going from the serial port to the outside world
+    pub outbound_handle: tokio::task::JoinHandle<()>,
+    pub inbound_handle: tokio::task::JoinHandle<()>,
+    /// outbound refers to data going from the serial port to the outside world.
+    /// [Reader] i.e. `rx` is expected to be used. Don't touch `tx`.
     pub outbound: Channel<BufferType>,
     /// inbound refers to data coming from the outside world to the serial port
+    /// [Writer] i.e. `tx` is expected to be used. Don't touch `rx`.
     pub inbound: Channel<BufferType>,
 }
 
@@ -152,6 +155,8 @@ impl service::SerialService for SerialServer {
                 // https://github.com/tokio-rs/tokio/blob/master/examples/echo-udp.rs
                 let udp_port = req.udp_port;
                 if udp_port.is_negative() || udp_port == 0 {}
+                // TODO: bind to a random port and listen for incoming data
+                // bind the udp to outbound rx and inbound tx
                 let socket = UdpSocket::bind("").await;
                 let mut managed_options = api::ManagedOptions::default();
                 // https://github.com/tokio-rs/tokio/discussions/3891
@@ -160,11 +165,11 @@ impl service::SerialService for SerialServer {
                 let out_rx = Arc::new(rx);
                 managed_options.options = Some(options.clone());
                 managed_options.udp_port = udp_port;
-                let mut pinned_port = Arc::pin(Mutex::new(SyncSerialStream(port)));
-                let mut pinned_port_ = pinned_port.clone();
+                let pinned_port = Arc::pin(Mutex::new(SyncSerialStream(port)));
+                let pinned_port_ = pinned_port.clone();
                 let out_tx_ = out_tx.clone();
                 let out_rx_ = out_rx.clone();
-                let handle = tokio::spawn(async move {
+                let out_handle = tokio::spawn(async move {
                     let mut buf = [0u8; 512];
                     // https://v0-1--tokio.netlify.app/docs/io/async_read_write/
                     loop {
@@ -195,6 +200,21 @@ impl service::SerialService for SerialServer {
                         }
                     }
                 });
+                let (in_tx, in_rx) = flume::bounded::<BufferType>(8);
+                let in_tx = Arc::new(in_tx);
+                let in_rx = Arc::new(in_rx);
+                let in_rx_ = in_rx.clone();
+                let pinned_port_ = pinned_port.clone();
+                let in_handle = tokio::spawn(async move {
+                    for data in in_rx_.iter() {
+                        match pinned_port_.lock().await.write_all(&data).await {
+                            Ok(_) => {}
+                            Err(e) => {
+                                error!("error writing to serial port: {}", e);
+                            }
+                        }
+                    }
+                });
                 // https://github.com/tokio-rs/tokio/discussions/3891
                 // https://hackernoon.com/pin-safety-understanding-pinning-in-rust-futures
                 // https://v0-1--tokio.netlify.app/docs/internals/net/
@@ -203,8 +223,16 @@ impl service::SerialService for SerialServer {
                     port_name: req.device.clone(),
                     options: managed_options.clone(),
                     udp: None,
-                    join_handle: handle,
-                    outbound: Channel { rx: out_rx, tx: out_tx },
+                    outbound_handle: out_handle,
+                    inbound_handle: in_handle,
+                    outbound: Channel {
+                        rx: out_rx,
+                        tx: out_tx,
+                    },
+                    inbound: Channel {
+                        rx: in_rx,
+                        tx: in_tx,
+                    },
                 };
                 let mut response = api::Serial::default();
                 // https://github.com/hyperium/tonic/discussions/1094
