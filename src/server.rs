@@ -1,6 +1,6 @@
 use crate::serial::api::out as api;
 use crate::serial::api::out::serial_service_server as service;
-use parking_lot::Mutex;
+use tokio::sync::Mutex;
 use serialport::SerialPort;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -73,24 +73,26 @@ impl service::SerialService for SerialServer {
         _req: tonic::Request<()>,
     ) -> Result<tonic::Response<api::ListResponse>, tonic::Status> {
         let mut response = api::ListResponse::default();
-        let res = serialport::available_ports().map(|ports| {
-            // what would happen if we disconnect the device while the device is still managed?
-            for port in ports {
-                let managed = self.managed.lock();
-                let options = managed.get(&port.port_name).map(|s| s.options);
-                let mut s = api::Serial::default();
-                s.device = port.port_name;
-                s.managed = options;
-                response.serials.push(s);
+        match serialport::available_ports() {
+            Ok(ports) => {
+                for port in ports {
+                    let managed = self.managed.lock().await;
+                    let options = managed.get(&port.port_name).map(|s| s.options);
+                    let mut s = api::Serial::default();
+                    s.device = port.port_name;
+                    s.managed = options;
+                    response.serials.push(s);
+                }
+                Ok(tonic::Response::new(response))
+            },
+            Err(e) => {
+                error!("error listing serial ports: {}", e);
+                return Err(tonic::Status::internal(e.description))
             }
-        });
-        match res {
-            Ok(_) => Ok(tonic::Response::new(response)),
-            Err(e) => Err(tonic::Status::internal(e.description)),
         }
     }
     async fn open(
-        &mut self,
+        &self,
         req: tonic::Request<api::OpenRequest>,
     ) -> Result<tonic::Response<api::Serial>, tonic::Status> {
         let req = req.into_inner();
@@ -130,7 +132,8 @@ impl service::SerialService for SerialServer {
                     udp: None,
                 };
                 let mut response = api::Serial::default();
-                let managed = self.managed.lock();
+                // https://github.com/hyperium/tonic/discussions/1094
+                let managed = self.managed.lock().await;
                 managed.insert(req.device, managed_dev);
                 response.device = req.device;
                 response.managed = Some(cm);
