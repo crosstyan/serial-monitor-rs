@@ -3,6 +3,7 @@ use crate::serial::api::out::serial_service_server as service;
 use flume;
 use serialport::SerialPort;
 use std::io::Read;
+use std::ops::{DerefMut, Deref};
 use std::sync::Arc;
 use std::{collections::HashMap, pin::Pin};
 use tokio::io::{AsyncRead, AsyncReadExt};
@@ -13,8 +14,26 @@ use tokio_serial::{SerialPortBuilderExt, SerialStream};
 use tracing::{debug, error, info, instrument, trace, warn};
 use std::vec::Vec;
 
+pub struct SendSerialStream(pub SerialStream);
+
+impl Deref for SendSerialStream {
+    type Target = SerialStream;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl DerefMut for SendSerialStream {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
+unsafe impl Send for SendSerialStream {}
+unsafe impl Sync for SendSerialStream {}
+
 pub type BufferType = Vec<u8>;
-pub type PinnedSerialPort = Pin<Box<SerialStream>>;
+pub type PinnedSerialPort = Pin<Arc<RwLock<SendSerialStream>>>;
 pub struct ManagedSerialDevice {
     pub port: PinnedSerialPort,
     pub port_name: String,
