@@ -20,9 +20,9 @@ pub struct ManagedSerialDevice {
     pub port_name: String,
     pub options: api::ManagedOptions,
     pub udp: Option<UdpSocket>,
-    pub join_handle: Option<tokio::task::JoinHandle<()>>,
-    pub rx: Option<Receiver<BufferType>>,
-    pub tx: Option<Sender<BufferType>>,
+    pub join_handle: tokio::task::JoinHandle<()>,
+    pub rx: Arc<Receiver<BufferType>>,
+    pub tx: Arc<Sender<BufferType>>,
 }
 
 #[derive(Default)]
@@ -130,10 +130,14 @@ impl service::SerialService for SerialServer {
                 let mut managed_options = api::ManagedOptions::default();
                 // https://github.com/tokio-rs/tokio/discussions/3891
                 let (tx, rx) = flume::bounded::<BufferType>(8);
+                let tx = Arc::new(tx);
+                let rx = Arc::new(rx);
                 managed_options.options = Some(options.clone());
                 managed_options.udp_port = udp_port;
-                let pinned_port = Box::pin(port);
-                let handle = tokio::spawn(async {
+                let mut pinned_port = Box::pin(port);
+                let tx_ = tx.clone();
+                let rx_ = rx.clone();
+                let handle = tokio::spawn(async move {
                     let mut buf = [0u8; 512];
                     // https://v0-1--tokio.netlify.app/docs/io/async_read_write/
                     loop {
@@ -142,16 +146,16 @@ impl service::SerialService for SerialServer {
                             Ok(n) => {
                                 let mut v = std::vec::Vec::with_capacity(n);
                                 v.extend_from_slice(&buf[0..n]);
-                                if let Some(c) = rx.capacity() {
-                                    while c >= tx.len() {
-                                        debug!("full channel for {} >= {}", tx.len(), c);
-                                        let _ = rx.recv_async().await;
-                                        c = rx.capacity().unwrap_or(0);
+                                if let Some(mut c) = rx_.capacity() {
+                                    while c >= tx_.len() {
+                                        debug!("full channel for {} >= {}", tx_.len(), c);
+                                        let _ = rx_.recv_async().await;
+                                        c = rx_.capacity().unwrap_or(0);
                                     }
                                 } else {
                                     debug!("unbounded channel");
                                 }
-                                match tx.send(v) {
+                                match tx_.send(v) {
                                     Ok(_) => {}
                                     Err(e) => {
                                         error!("error sending to channel: {}", e);
@@ -172,9 +176,9 @@ impl service::SerialService for SerialServer {
                     port_name: req.device.clone(),
                     options: managed_options.clone(),
                     udp: None,
-                    join_handle: Some(handle),
-                    rx: Some(rx),
-                    tx: Some(tx),
+                    join_handle: handle,
+                    rx: rx,
+                    tx: tx,
                 };
                 let mut response = api::Serial::default();
                 // https://github.com/hyperium/tonic/discussions/1094
