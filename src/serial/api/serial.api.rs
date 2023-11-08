@@ -56,8 +56,6 @@ pub struct ListResponse {
 pub struct OpenRequest {
     #[prost(string, tag = "1")]
     pub device: ::prost::alloc::string::String,
-    #[prost(int32, tag = "3")]
-    pub udp_port: i32,
     #[prost(message, optional, tag = "2")]
     pub options: ::core::option::Option<OpenOptions>,
 }

@@ -2,6 +2,7 @@ use crate::serial::api::out as api;
 use crate::serial::api::out::serial_service_server as service;
 use flume;
 use flume::{Receiver, Sender};
+use rand::Rng;
 use serialport::SerialPort;
 use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
@@ -43,7 +44,7 @@ pub struct ManagedSerialDevice {
     port: PinnedSerialPort,
     port_name: String,
     options: api::ManagedOptions,
-    udp: Option<UdpSocket>,
+    udp: Option<Arc<Mutex<UdpSocket>>>,
     outbound_handle: tokio::task::JoinHandle<()>,
     inbound_handle: tokio::task::JoinHandle<()>,
     /// outbound refers to data going from the serial port to the outside world.
@@ -64,11 +65,8 @@ impl ManagedSerialDevice {
     pub fn port_name(&self) -> &str {
         &self.port_name
     }
-    pub fn udp(&self) -> Option<&UdpSocket> {
-        self.udp.as_ref()
-    }
-    pub fn mut_udp(&mut self) -> Option<&mut UdpSocket> {
-        self.udp.as_mut()
+    pub fn udp(&self) -> Option<Arc<Mutex<UdpSocket>>> {
+        self.udp
     }
     pub fn options(&self) -> &api::ManagedOptions {
         &self.options
@@ -181,18 +179,27 @@ impl service::SerialService for SerialServer {
         match res {
             Ok(port) => {
                 // https://github.com/tokio-rs/tokio/blob/master/examples/echo-udp.rs
-                let udp_port = req.udp_port;
-                if udp_port.is_negative() || udp_port == 0 {}
+                // https://en.wikipedia.org/wiki/Registered_port
+                // https://stackoverflow.com/questions/67443847/how-to-generate-random-numbers-in-async-rust
+                let udp_port = {
+                    let mut rng = rand::thread_rng();
+                    rng.gen_range(49152..65535)
+                };
                 // TODO: bind to a random port and listen for incoming data
                 // bind the udp to outbound rx and inbound tx
-                let socket = UdpSocket::bind("").await;
+                let udp_addr = format!("0.0.0.0:{}", udp_port);
+                let socket = UdpSocket::bind(udp_addr)
+                    .await
+                    .map(|s| Arc::new(Mutex::new(s)))
+                    .map_err(|e| Arc::new(e)); // need an Arc to make error Clone
+                let socket_ = socket.clone();
                 let mut managed_options = api::ManagedOptions::default();
                 // https://github.com/tokio-rs/tokio/discussions/3891
                 let (tx, rx) = flume::bounded::<BufferType>(8);
                 let out_tx = Arc::new(tx);
                 let out_rx = Arc::new(rx);
                 managed_options.options = Some(options.clone());
-                managed_options.udp_port = udp_port;
+                managed_options.udp_port = if socket.is_ok() { udp_port } else { -1 };
                 let pinned_port = Arc::pin(Mutex::new(SyncSerialStream(port)));
                 let pinned_port_ = pinned_port.clone();
                 let out_tx_ = out_tx.clone();

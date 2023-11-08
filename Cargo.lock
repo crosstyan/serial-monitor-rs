@@ -1032,6 +1032,7 @@ dependencies = [
  "parking_lot",
  "prost",
  "prost-types",
+ "rand",
  "serialport",
  "tokio",
  "tokio-serial",

@@ -81,7 +81,6 @@ message ListResponse {
 
 message OpenRequest {
   string device = 1;
-  int32 udpPort = 3;
   OpenOptions options = 2;
 }
 
